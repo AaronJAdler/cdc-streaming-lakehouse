@@ -36,7 +36,7 @@ sys.exit(0 if ok else 1)'
 
 topic_offsets() {
   docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh \
-    --bootstrap-server kafka:9092 --topic-pattern 'shop\.public\..*' \
+    --bootstrap-server kafka:9092 --topic 'shop\.public\..*' \
     | awk -F: '{ total += $3 } END { print total + 0 }'
 }
 
