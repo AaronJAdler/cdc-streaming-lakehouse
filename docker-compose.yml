@@ -9,8 +9,11 @@
 services:
   postgres:
     image: postgres:16
+    # max_slot_wal_keep_size bounds the WAL a slot nobody drains can pin. Past it the slot is
+    # marked lost and must be recreated (see README, "When the slot is lost"); without it a
+    # stopped consumer fills the disk and takes the source database down.
     command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4",
-              "-c", "max_wal_senders=4"]
+              "-c", "max_wal_senders=4", "-c", "max_slot_wal_keep_size=1GB"]
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: shop

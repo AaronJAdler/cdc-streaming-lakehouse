@@ -124,3 +124,44 @@ def test_decoder_handles_nulls_and_unchanged_large_values() -> None:
     assert event["op"] == "u" and event["before"] is None
     # an unchanged TOAST value is left out rather than overwritten with null
     assert event["after"] == {"order_id": 42, "status": None}
+
+
+def _fill_wal(dsn: str, megabytes: int) -> None:
+    """Writes about `megabytes` of WAL without touching the captured tables."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS filler (payload text)")
+        for _ in range(megabytes):
+            conn.execute(
+                "INSERT INTO filler SELECT repeat('x', 1024) FROM generate_series(1, 1024)"
+            )
+            conn.execute("TRUNCATE filler")
+        # Segments are only removed at a checkpoint; a WAL switch makes the current one eligible.
+        conn.execute("SELECT pg_switch_wal()")
+        conn.execute("CHECKPOINT")
+
+
+def test_slot_nobody_drains_is_bounded_and_reported_as_lost(database: str, tmp_path: Path) -> None:
+    """The test server sets max_slot_wal_keep_size = 64MB. Past it the slot is lost, not the disk.
+
+    Without the bound every segment since the slot's restart_lsn is kept for ever; a stopped
+    consumer then fills the primary's disk. With it, Postgres releases the WAL and marks the slot
+    `lost`, and `drain` refuses with the recovery steps instead of hanging on a slot that can
+    never catch up.
+    """
+    workload.setup(database)
+    capture.create_slot(database)
+    workload.run(database, orders=5)
+
+    before = capture.slot_health(database)
+    assert before is not None and before.wal_status in {"reserved", "extended"}
+    assert before.safe_wal_bytes is not None
+    assert 0 < before.safe_wal_bytes <= (64 + 16) * 2**20  # the bound plus one open segment
+
+    _fill_wal(database, megabytes=160)
+
+    after = capture.slot_health(database)
+    assert after is not None and after.wal_status == "lost", after
+    assert after.retained_bytes is None and after.safe_wal_bytes is None  # the WAL is gone
+    with pytest.raises(capture.SlotLost, match="re-snapshot"):
+        capture.drain(database, str(tmp_path))
+    assert not list(tmp_path.glob("changes-*.json"))  # nothing half-written on the way out
