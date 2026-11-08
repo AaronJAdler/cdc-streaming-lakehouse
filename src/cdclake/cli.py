@@ -50,9 +50,12 @@ def _embedded_postgres(workdir: Path) -> Any:
     server = pgserver.get_server(data, cleanup_mode="stop")  # type: ignore[attr-defined]
     with psycopg.connect(server.get_uri(), autocommit=True) as conn:
         level = conn.execute("SHOW wal_level").fetchone()
-        if level and level[0] != "logical":
+        keep = conn.execute("SHOW max_slot_wal_keep_size").fetchone()
+        if (level and level[0] != "logical") or (keep and keep[0] == "-1"):
             conn.execute("ALTER SYSTEM SET wal_level = logical")
-            server.cleanup()  # the setting needs a restart
+            # The same bound as docker-compose.yml: a slot never pins more than this much WAL.
+            conn.execute("ALTER SYSTEM SET max_slot_wal_keep_size = '1GB'")
+            server.cleanup()  # the settings need a restart
             server = pgserver.get_server(data, cleanup_mode="stop")  # type: ignore[attr-defined]
     return server
 

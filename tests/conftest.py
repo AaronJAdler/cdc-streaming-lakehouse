@@ -19,6 +19,8 @@ def postgres(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     server = pgserver.get_server(data, cleanup_mode="stop")
     with psycopg.connect(server.get_uri(), autocommit=True) as conn:
         conn.execute("ALTER SYSTEM SET wal_level = logical")
+        # Small on purpose, so a test can push a slot past the bound in seconds.
+        conn.execute("ALTER SYSTEM SET max_slot_wal_keep_size = '64MB'")
     server.cleanup()
     server = pgserver.get_server(data, cleanup_mode="stop")
     yield server.get_uri()

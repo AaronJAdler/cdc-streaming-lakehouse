@@ -10,7 +10,7 @@ events and schema changes must not corrupt the copy.
 ```mermaid
 flowchart LR
     subgraph source["Operational database"]
-        app["Shop traffic<br/>(workload.py)"] --> pg[("Postgres 16<br/>wal_level=logical<br/>REPLICA IDENTITY FULL")]
+        app["Shop traffic<br/>(workload.py)"] --> pg[("Postgres 16<br/>wal_level=logical<br/>max_slot_wal_keep_size=1GB<br/>REPLICA IDENTITY FULL")]
     end
 
     subgraph capture["Change capture"]
@@ -163,7 +163,7 @@ and type changes are not handled automatically, and the next section says what h
 |---|---|---|
 | Spark crashes mid-batch | Replayed from the checkpoint; txn ids and the LSN guard prevent double-applies | Nothing; restart |
 | Debezium restarts | Resumes from its stored offset; may resend recent changes | Nothing; the LSN guard absorbs duplicates |
-| Spark is down for hours | The replication slot holds WAL on the Postgres disk until Debezium reads it | Alert on slot lag (`pg_current_wal_lsn() - confirmed_flush_lsn`); set `max_slot_wal_keep_size` |
+| Spark is down for hours | The replication slot holds WAL on the Postgres disk until Debezium reads it | Bounded: `max_slot_wal_keep_size` is set on every server this project starts, so the slot is marked `lost` past the bound instead of filling the disk ([ADR 0007](adr/0007-bounded-slot-wal-retention.md)). `capture.slot_health()` exposes `safe_wal_size` for alerting; `drain()` raises `SlotLost` with the recovery steps |
 | Checkpoint deleted | Spark rereads Kafka from earliest retained offset | Safe while Kafka retains everything since the snapshot; otherwise re-snapshot |
 | Column dropped or renamed at source | Old column stays in the mirror, new name appears as a new string column | Planned migration: update `schema.py`, backfill, and drop the old column |
 | Many small files | Each micro-batch commits small files | Schedule `OPTIMIZE` and `VACUUM` on the mirror tables |
@@ -175,7 +175,7 @@ and type changes are not handled automatically, and the next section says what h
 |---|---|
 | `schema.py` | Source table registry and DDL (keys, column types, `REPLICA IDENTITY FULL`) |
 | `workload.py` | Seeded shop traffic: orders, items, status changes, cancellations, a schema change, late syncs |
-| `capture.py` | Local capture: pgoutput protocol v1 decoder, slot and publication setup, atomic file writes |
+| `capture.py` | Local capture: pgoutput protocol v1 decoder, slot and publication setup, slot health and the `lost` check, atomic file writes |
 | `stream.py` | Spark session, Kafka or file source, `parse()`, the two streaming queries |
 | `sink.py` | Merges into the mirror with the txn-id and LSN guards; schema evolution; metrics upserts |
 | `metrics.py` | Exact window restatement from the mirror and the live-versus-exact gap |

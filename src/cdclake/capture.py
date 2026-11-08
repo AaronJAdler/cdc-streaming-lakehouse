@@ -152,6 +152,38 @@ class Decoder:
         }
 
 
+class SlotLost(RuntimeError):
+    """The slot fell behind by more than `max_slot_wal_keep_size` and the server released its WAL.
+
+    Nothing captured by this slot is recoverable: Postgres removed the segments. Recovery is to
+    drop the slot, take a fresh snapshot of the source tables into the lake, and create a new slot
+    (`cdclake setup`). The alternative, no bound at all, is a disk full of WAL and a source
+    database that stops accepting writes; that is why the bound is set everywhere this project
+    runs Postgres.
+    """
+
+
+@dataclass(frozen=True)
+class SlotHealth:
+    wal_status: str  # reserved | extended | unreserved | lost
+    retained_bytes: int | None  # WAL from restart_lsn to the write position; None once lost
+    safe_wal_bytes: int | None  # WAL still writable before the slot is lost; None once lost
+
+
+def slot_health(dsn: str) -> SlotHealth | None:
+    """How far the slot is behind and how close it is to being lost. None if there is no slot."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT wal_status, "
+            "pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, safe_wal_size "
+            "FROM pg_replication_slots WHERE slot_name = %s",
+            (SLOT,),
+        ).fetchone()
+    if row is None:
+        return None
+    return SlotHealth(row[0], *(None if v is None else int(v) for v in row[1:]))
+
+
 def create_slot(dsn: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as conn:
         if not conn.execute(
@@ -171,6 +203,12 @@ def drain(dsn: str, out_dir: str, max_changes: int = 500) -> int:
     half-written file. The slot advances only after the files exist, so a crash re-reads changes
     rather than losing them; downstream merges ignore anything already applied.
     """
+    health = slot_health(dsn)
+    if health is not None and health.wal_status == "lost":
+        raise SlotLost(
+            f"replication slot {SLOT!r} is lost: it fell more than max_slot_wal_keep_size behind "
+            "and the server removed its WAL. Drop the slot, re-snapshot, create a new slot."
+        )
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     with psycopg.connect(dsn, autocommit=True) as conn:

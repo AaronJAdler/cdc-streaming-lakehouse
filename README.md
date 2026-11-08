@@ -71,11 +71,21 @@ uv run cdclake reconcile --dsn "$DSN" --lake lake/      # exit code 1 if anythin
 uv run cdclake restate   --lake lake/
 ```
 
+## When the slot is lost
+
+Every Postgres this project starts sets `max_slot_wal_keep_size` (1 GB; 64 MB in tests). A slot
+whose consumer has stopped pins WAL until that bound, then Postgres marks it `lost` and frees the
+disk; without the bound the *source* database would fill its volume and stop taking writes.
+`cdclake capture` checks `pg_replication_slots.wal_status` first and exits with `SlotLost`
+instead of hanging. To recover: drop the slot, re-snapshot the tables into the mirror, run
+`cdclake setup` for a new slot. `capture.slot_health()` exposes `safe_wal_size` for alerting
+before that point. Rationale: [ADR 0007](docs/adr/0007-bounded-slot-wal-retention.md).
+
 ## Tests
 
 | Test file | What it proves |
 |---|---|
-| `test_capture.py` | pgoutput decoding of inserts, updates and deletes with full before images; UTC timestamps; the slot advances only after files are written, so a crash mid-drain replays instead of losing changes; null and unchanged-TOAST markers; new columns after `ALTER TABLE` |
+| `test_capture.py` | pgoutput decoding of inserts, updates and deletes with full before images; UTC timestamps; the slot advances only after files are written, so a crash mid-drain replays instead of losing changes; null and unchanged-TOAST markers; new columns after `ALTER TABLE`; a slot nobody drains is bounded by `max_slot_wal_keep_size`, becomes `lost`, and `drain` refuses with the recovery steps |
 | `test_sink.py` | latest change wins within a batch; an older change never overwrites a newer one; deletes become tombstones; a retried batch is skipped by its transaction id (batch 0 included); new source columns are added; a real Debezium message (snapshot `r`, extra fields, timestamps without fractions) applies correctly |
 | `test_pipeline.py` | three rounds of traffic, capture and streaming keep the mirror identical to the source; late orders miss live metrics and restatement recovers them exactly; a crash between two table commits recovers with no duplicates |
 
@@ -97,6 +107,7 @@ uv run cdclake restate   --lake lake/
 - [ADR 0004](docs/adr/0004-watermarked-live-metrics-plus-restatement.md): watermarked live metrics plus restatement
 - [ADR 0005](docs/adr/0005-additive-schema-evolution.md): additive schema evolution as nullable strings
 - [ADR 0006](docs/adr/0006-local-pgoutput-capture-for-tests.md): local pgoutput capture for tests, real Debezium in CI
+- [ADR 0007](docs/adr/0007-bounded-slot-wal-retention.md): a bound on the WAL a slot may retain, and what happens past it
 
 ## Layout
 
